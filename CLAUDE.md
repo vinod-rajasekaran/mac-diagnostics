@@ -109,15 +109,27 @@ what it means for them.
 
 ## Thresholds
 
-Currently inline literals
-(swap 2/6 GB, 50 swap-ins/sec, 15 %/25 % free, SSD 20/40 %, 800 cycles, 14 days
-uptime, 15 background items, 2 browsers, 5/7 years of age, 256 GB volume). Most
-now appear twice inside `mac-triage-diagnose.sh`: once in the `flag`/`warn` lines
-and once in the verdict block. **Change both, and the README threshold table.**
+**Every number the script judges by is a `T_*` constant** in one block near the
+top of `mac-triage-diagnose.sh`, each with an environment override:
+
+```bash
+T_UPTIME_DAYS=${T_UPTIME_DAYS:-14}
+```
+
+Never write a bare threshold literal in a comparison. They are used twice over
+— once in a `flag`/`warn` line, once in the verdict block — and when those two
+disagree the report contradicts its own conclusion. That is the bug this block
+exists to prevent, so a new threshold gets a constant even on its first use.
+
+Text that quotes a threshold interpolates it too (`Target is ${T_FREE_TARGET}%`,
+not `Target is 25%`), or the prose drifts from the logic it describes.
 
 The age thresholds follow Apple's own definitions — vintage at 5 years, obsolete
 at 7 — rather than numbers picked arbitrarily. Say so in any comment that
 changes them.
+
+Changing a default still means changing the threshold table in `README.md`,
+which lists each signal against its variable name.
 
 ## The CSV
 

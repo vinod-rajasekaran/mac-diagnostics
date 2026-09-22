@@ -179,23 +179,30 @@ only over the paths it genuinely deletes, so the number is a promise it can keep
 
 ### Thresholds
 
-| Signal | `[WATCH]` | `[FLAG]` |
-|---|---|---|
-| Uptime | — | ≥ 14 days |
-| Machine age | 5–6 years (vintage) | ≥ 7 years (obsolete) |
-| Memory pressure | `warning` | `critical` |
-| Swap in use | > 2 GB | > 6 GB |
-| Swap-ins/sec | — | > 50 |
-| Free space on Data | < 25 % | < 15 % |
-| Volume ≤ 256 GB and < 25 % free | undersized for the work | — |
-| Local TM snapshots | ≥ 3 | — |
-| SSD life used | 20–39 % | ≥ 40 % |
-| Battery cycles | ≥ 800 | — |
-| Battery condition | — | anything but `Normal` |
-| Third-party launch items | — | ≥ 15 |
-| Browser engines resident | — | ≥ 2 |
-| Rosetta builds | — | any |
-| Kernel panics (30d) | — | any |
+Every number the script judges by lives in one block at the top of
+`mac-triage-diagnose.sh`, and each can be overridden from the environment:
+
+```bash
+T_SWAP_HIGH=10 T_FREE_TARGET=20 ./mac-triage-diagnose.sh
+```
+
+| Signal | Variable | `[WATCH]` | `[FLAG]` |
+|---|---|---|---|
+| Uptime | `T_UPTIME_DAYS` | — | ≥ 14 days |
+| Machine age | `T_AGE_VINTAGE` `T_AGE_OBSOLETE` | 5–6 years (vintage) | ≥ 7 years (obsolete) |
+| Memory pressure | — | `warning` | `critical` |
+| Swap in use | `T_SWAP_WARN` `T_SWAP_HIGH` | > 2 GB | > 6 GB |
+| Swap-ins/sec | `T_SWAPIN` | — | > 50 |
+| Free space on Data | `T_FREE_TARGET` `T_FREE_CRIT` | < 25 % | < 15 % |
+| Volume ≤ 256 GB and < 25 % free | `T_SMALL_DISK_GB` | undersized for the work | — |
+| Local TM snapshots | `T_SNAPSHOTS` | ≥ 3 | — |
+| SSD life used | `T_SSD_WATCH` `T_SSD_HIGH` | 20–39 % | ≥ 40 % |
+| Battery cycles | `T_BATT_CYCLES` | ≥ 800 | — |
+| Battery condition | — | — | anything but `Normal` |
+| Third-party launch items | `T_BG_ITEMS` | — | ≥ 15 |
+| Browser engines resident | `T_BROWSERS` | — | ≥ 2 |
+| Rosetta builds | — | — | any |
+| Kernel panics (30d) | — | — | any |
 
 ### Keeping a history
 
@@ -294,8 +301,9 @@ because a script should not silently flip them:
   age rather than with a guessed one.
 - **No macOS-support horizon.** Whether a model still takes the current macOS is
   often the real deciding factor in a replacement, and is not checked — only age.
-- **Thresholds are inline literals**, documented in the table above. Change one,
-  change the table.
+- **The threshold table above must be kept in step with the constants.** The
+  script no longer duplicates them internally, but the README can still drift
+  from the code.
 - **The reclaimable-space estimate runs `du`** over a handful of cache paths,
   which adds a second or two on machines with very large caches.
 

@@ -36,6 +36,38 @@ while [ $# -gt 0 ]; do
   shift
 done
 
+# ---------------------------------------------------------------- thresholds
+#
+# Every number this script judges by, in one place. They appear twice in the
+# output — once in a [FLAG]/[WATCH] line, once in the verdict — and they must
+# agree, or the report contradicts its own conclusion.
+#
+# Override any of them from the environment to suit a different set of machines:
+#   T_SWAP_HIGH=10 ./mac-triage-diagnose.sh
+# The defaults are documented in the threshold table in README.md; change one
+# here and change it there.
+
+T_UPTIME_DAYS=${T_UPTIME_DAYS:-14}      # restart overdue
+T_AGE_VINTAGE=${T_AGE_VINTAGE:-5}       # Apple calls a product vintage at 5 years
+T_AGE_OBSOLETE=${T_AGE_OBSOLETE:-7}     # ...and obsolete at 7
+T_SWAP_WARN=${T_SWAP_WARN:-2}           # GB of swap: workload no longer fits
+T_SWAP_HIGH=${T_SWAP_HIGH:-6}           # GB of swap: sustained paging
+T_SWAPIN=${T_SWAPIN:-50}                # pages/sec read back: active thrashing
+T_FREE_CRIT=${T_FREE_CRIT:-15}          # % free below which swap cannot grow cleanly
+T_FREE_TARGET=${T_FREE_TARGET:-25}      # % free to reach before judging the machine
+T_SMALL_DISK_GB=${T_SMALL_DISK_GB:-256} # volume at or under this is undersized, not untidy
+T_SSD_WATCH=${T_SSD_WATCH:-20}          # % of write endurance used: worth watching
+T_SSD_HIGH=${T_SSD_HIGH:-40}            # % of write endurance used: spent
+T_BATT_CYCLES=${T_BATT_CYCLES:-800}     # charge cycles past rated life
+T_BG_ITEMS=${T_BG_ITEMS:-15}            # third-party launch agents and daemons
+T_BROWSERS=${T_BROWSERS:-2}             # browser engines resident at once
+T_CHROME_PROCS=${T_CHROME_PROCS:-40}    # Chrome helper processes
+T_SNAPSHOTS=${T_SNAPSHOTS:-3}           # local Time Machine snapshots
+T_RECLAIM_GB=${T_RECLAIM_GB:-2}         # GB reclaimable before a cleanup is worth it
+T_CLEAN_STALE_DAYS=${T_CLEAN_STALE_DAYS:-30}  # after this, a past cleanup says nothing
+T_AI_ASSETS_GB=${T_AI_ASSETS_GB:-1}     # GB of Apple Intelligence models
+T_PROC_CPU=${T_PROC_CPU:-20}            # % CPU for a stuck background daemon
+
 if [ -t 1 ] && [ "$CSV_MODE" -eq 0 ] && command -v tput >/dev/null 2>&1; then
   BOLD=$(tput bold); RED=$(tput setaf 1); YEL=$(tput setaf 3); GRN=$(tput setaf 2); RST=$(tput sgr0)
 else
@@ -184,13 +216,13 @@ if [ "$UP_SECS" -eq 0 ]; then
 else
   say "Uptime:  ${UP_DAYS} days ${UP_HOURS} hours (last restart $(date -r $(( $(date +%s) - UP_SECS )) '+%a %d %b %H:%M' 2>/dev/null))"
 fi
-[ "${UP_DAYS:-0}" -ge 14 ] && flag "Not restarted in ${UP_DAYS} days. Swap and leaked memory never come back on their own."
+[ "${UP_DAYS:-0}" -ge "$T_UPTIME_DAYS" ] && flag "Not restarted in ${UP_DAYS} days. Swap and leaked memory never come back on their own."
 if [ -n "${AGE_YEARS:-}" ]; then
   # Apple treats a product as vintage at 5 years and obsolete at 7. Past 7 the
   # question stops being "what is wrong with it" and becomes "when do we
   # replace it", and cleanup buys progressively less time.
-  [ "$AGE_YEARS" -ge 7 ] && flag "${AGE_YEARS} years old (by ${AGE_BASIS}). Past Apple's obsolete threshold; budget a replacement rather than tuning this one."
-  [ "$AGE_YEARS" -ge 5 ] && [ "$AGE_YEARS" -lt 7 ] && warn "${AGE_YEARS} years old (by ${AGE_BASIS}). Vintage territory; plan for it in the next refresh cycle."
+  [ "$AGE_YEARS" -ge "$T_AGE_OBSOLETE" ] && flag "${AGE_YEARS} years old (by ${AGE_BASIS}). Past Apple's obsolete threshold; budget a replacement rather than tuning this one."
+  [ "$AGE_YEARS" -ge "$T_AGE_VINTAGE" ] && [ "$AGE_YEARS" -lt "$T_AGE_OBSOLETE" ] && warn "${AGE_YEARS} years old (by ${AGE_BASIS}). Vintage territory; plan for it in the next refresh cycle."
 fi
 
 # ------------------------------------------------------------------ memory
@@ -230,9 +262,9 @@ say "Swap-ins/sec:     ${SWAPIN_RATE} (over ${SAMPLE_SECONDS}s)"
 
 [ "$PRESSURE" = "critical" ] && flag "Memory pressure is critical. The machine is out of RAM right now."
 [ "$PRESSURE" = "warning" ] && warn "Memory pressure is at warning. Close to the edge under this workload."
-awk -v s="$SWAP_GB" 'BEGIN{exit !(s>6)}' && flag "Swap is ${SWAP_GB} GB. Sustained paging at this level is the slowness people are reporting."
-awk -v s="$SWAP_GB" 'BEGIN{exit !(s>2 && s<=6)}' && warn "Swap is ${SWAP_GB} GB. Workload does not fit comfortably in ${RAM_GB} GB."
-[ "$SWAPIN_RATE" -gt 50 ] && flag "Pages are being read back from swap at ${SWAPIN_RATE}/sec. This is active thrashing, not just allocated swap."
+awk -v s="$SWAP_GB" -v h="$T_SWAP_HIGH" 'BEGIN{exit !(s>h)}' && flag "Swap is ${SWAP_GB} GB. Sustained paging at this level is the slowness people are reporting."
+awk -v s="$SWAP_GB" -v w="$T_SWAP_WARN" -v h="$T_SWAP_HIGH" 'BEGIN{exit !(s>w && s<=h)}' && warn "Swap is ${SWAP_GB} GB. Workload does not fit comfortably in ${RAM_GB} GB."
+[ "$SWAPIN_RATE" -gt "$T_SWAPIN" ] && flag "Pages are being read back from swap at ${SWAPIN_RATE}/sec. This is active thrashing, not just allocated swap."
 
 say ""
 say "Top 8 by memory:"
@@ -257,12 +289,12 @@ for pair in "Chrome:$CHROME" "ChatGPT/Atlas:$ATLAS" "Safari:$SAFARI" "WhatsApp:$
 done
 
 BROWSERS=$(( CHROME + ATLAS + SAFARI ))
-[ "$BROWSERS" -ge 2 ] && flag "$BROWSERS browser engines are resident at once. On ${RAM_GB} GB this alone can account for the slowness."
+[ "$BROWSERS" -ge "$T_BROWSERS" ] && flag "$BROWSERS browser engines are resident at once. On ${RAM_GB} GB this alone can account for the slowness."
 [ "$CLAUDE_APP" = "1" ] && [ "$CLAUDE_CODE" = "1" ] && warn "Claude desktop app and Claude Code are both resident."
 
 CHROME_PROCS=$(pgrep -fc "Google Chrome" 2>/dev/null | head -1)
 case "${CHROME_PROCS:-}" in ''|*[!0-9]*) CHROME_PROCS=0 ;; esac
-[ "$CHROME_PROCS" -gt 40 ] && warn "$CHROME_PROCS Chrome processes. Tab count is out of hand; turn on Memory Saver."
+[ "$CHROME_PROCS" -gt "$T_CHROME_PROCS" ] && warn "$CHROME_PROCS Chrome processes. Tab count is out of hand; turn on Memory Saver."
 
 # Rosetta builds use more memory than native ones.
 ROSETTA_APPS=""
@@ -293,18 +325,18 @@ FREE_SPACE_PCT=$(( 100 - ${D_PCT:-0} ))
 
 say "Data volume: ${TOTAL_GB} GB total, ${FREE_GB} GB free (${FREE_SPACE_PCT}% free)"
 
-if [ "$FREE_SPACE_PCT" -lt 15 ]; then
+if [ "$FREE_SPACE_PCT" -lt "$T_FREE_CRIT" ]; then
   flag "Only ${FREE_SPACE_PCT}% free. Below this macOS cannot grow swap cleanly and everything degrades at once."
-elif [ "$FREE_SPACE_PCT" -lt 25 ]; then
-  warn "${FREE_SPACE_PCT}% free. Target is 25% before judging this machine."
+elif [ "$FREE_SPACE_PCT" -lt "$T_FREE_TARGET" ]; then
+  warn "${FREE_SPACE_PCT}% free. Target is ${T_FREE_TARGET}% before judging this machine."
 else
-  ok "Free space is above the 25% floor."
+  ok "Free space is above the ${T_FREE_TARGET}% floor."
 fi
 
 # A 256 GB volume that is short of space after a cleanup is not a housekeeping
 # problem. Storage is not upgradeable on Apple Silicon, so this belongs in the
 # refresh plan rather than in a list of things the user should delete.
-if [ "${TOTAL_GB:-0}" -le 256 ] && [ "$FREE_SPACE_PCT" -lt 25 ]; then
+if [ "${TOTAL_GB:-0}" -le "$T_SMALL_DISK_GB" ] && [ "$FREE_SPACE_PCT" -lt "$T_FREE_TARGET" ]; then
   warn "${TOTAL_GB} GB volume with ${FREE_SPACE_PCT}% free. If this persists after cleanup, the disk is undersized for this role, not untidy."
 fi
 
@@ -313,7 +345,7 @@ fi
 SNAPS=$(tmutil listlocalsnapshots / 2>/dev/null | grep -c 'com.apple.TimeMachine' | head -1 | tr -cd '0-9')
 [ -z "$SNAPS" ] && SNAPS=0
 say "Local Time Machine snapshots: ${SNAPS}"
-[ "${SNAPS:-0}" -ge 3 ] && warn "${SNAPS} local snapshots are holding disk space that Finder reports as purgeable."
+[ "${SNAPS:-0}" -ge "$T_SNAPSHOTS" ] && warn "${SNAPS} local snapshots are holding disk space that Finder reports as purgeable."
 
 PURGEABLE=$(diskutil info "$DATA_VOL" 2>/dev/null | awk -F': *' '/Volume Free Space|Container Free Space/ {print $2; exit}')
 [ -n "${PURGEABLE:-}" ] && say "Container free space: ${PURGEABLE}"
@@ -337,8 +369,8 @@ fi
 
 if [ -n "$SSD_PCT" ]; then
   say "SSD life used: ${SSD_PCT}%${SSD_TBW:+  (written: $SSD_TBW)}"
-  [ "$SSD_PCT" -ge 40 ] && flag "SSD is ${SSD_PCT}% through its write endurance. Years of swap have already been written to it."
-  [ "$SSD_PCT" -ge 20 ] && [ "$SSD_PCT" -lt 40 ] && warn "SSD is ${SSD_PCT}% used. Worth watching."
+  [ "$SSD_PCT" -ge "$T_SSD_HIGH" ] && flag "SSD is ${SSD_PCT}% through its write endurance. Years of swap have already been written to it."
+  [ "$SSD_PCT" -ge "$T_SSD_WATCH" ] && [ "$SSD_PCT" -lt "$T_SSD_HIGH" ] && warn "SSD is ${SSD_PCT}% used. Worth watching."
 elif command -v smartctl >/dev/null 2>&1; then
   warn "SSD wear not read. Run: sudo smartctl -a /dev/disk0 | grep 'Percentage Used'"
 else
@@ -356,20 +388,20 @@ SD=$(count_dir "/Library/LaunchDaemons")
 THIRD_PARTY=$(( UA + SA + SD ))
 
 say "Launch agents/daemons outside macOS itself: ${THIRD_PARTY} (user ${UA}, system ${SA}, daemons ${SD})"
-[ "$THIRD_PARTY" -ge 15 ] && flag "${THIRD_PARTY} third-party background items load at boot. Most belong to software nobody uses any more."
+[ "$THIRD_PARTY" -ge "$T_BG_ITEMS" ] && flag "${THIRD_PARTY} third-party background items load at boot. Most belong to software nobody uses any more."
 [ "$CSV_MODE" -eq 0 ] && for d in "$HOME/Library/LaunchAgents" /Library/LaunchAgents /Library/LaunchDaemons; do
   [ -d "$d" ] && ls -1 "$d" 2>/dev/null | sed "s|^|  $d/|"
 done
 
 AI_ASSETS=$(du -sk /System/Library/AssetsV2/com_apple_MobileAsset_UAF_* 2>/dev/null | awk '{s+=$1} END {printf "%.1f", s/1048576}')
-if [ -n "${AI_ASSETS:-}" ] && awk -v g="${AI_ASSETS:-0}" 'BEGIN{exit !(g>1)}'; then
+if [ -n "${AI_ASSETS:-}" ] && awk -v g="${AI_ASSETS:-0}" -v t="$T_AI_ASSETS_GB" 'BEGIN{exit !(g>t)}'; then
   warn "Apple Intelligence models are using ${AI_ASSETS} GB on a machine that does not need them."
 fi
 
 for p in mds_stores mdworker photoanalysisd bird cloudd; do
   if pgrep -qx "$p" 2>/dev/null; then
     C=$(ps -o pcpu= -p "$(pgrep -x "$p" | head -1)" 2>/dev/null | tr -d ' ')
-    awk -v c="${C:-0}" 'BEGIN{exit !(c>20)}' && warn "$p is at ${C}% CPU. Stuck Spotlight index or a jammed iCloud sync will do that."
+    awk -v c="${C:-0}" -v t="$T_PROC_CPU" 'BEGIN{exit !(c>t)}' && warn "$p is at ${C}% CPU. Stuck Spotlight index or a jammed iCloud sync will do that."
   fi
 done
 
@@ -395,7 +427,7 @@ else
   warn "Battery not read. Check by hand: system_profiler SPPowerDataType | grep -A4 'Health Information'"
 fi
 [ -n "${COND:-}" ] && [ "${COND}" != "Normal" ] && flag "Battery condition is '${COND}'. Replace the battery or the machine."
-[ -n "${CYCLES:-}" ] && [ "${CYCLES}" -ge 800 ] && warn "${CYCLES} charge cycles. Past the rated life."
+[ -n "${CYCLES:-}" ] && [ "${CYCLES}" -ge "$T_BATT_CYCLES" ] && warn "${CYCLES} charge cycles. Past the rated life."
 
 PANICS=$(find /Library/Logs/DiagnosticReports -name "*panic*" -mtime -30 2>/dev/null | wc -l | tr -d ' ')
 [ "${PANICS:-0}" -gt 0 ] && flag "${PANICS} kernel panic report(s) in the last 30 days. That is hardware or a bad driver, not workload."
@@ -410,7 +442,7 @@ STATE_FILE="$HOME/.mac-triage/last-cleanup"
 CLEANED_AT=$(cat "$STATE_FILE" 2>/dev/null | head -1 | tr -cd '0-9')
 if [ -z "${CLEANED_AT:-}" ]; then
   CLEAN_STATE="never"
-elif [ "$(( $(date +%s) - CLEANED_AT ))" -gt 2592000 ]; then
+elif [ "$(( $(date +%s) - CLEANED_AT ))" -gt "$(( T_CLEAN_STALE_DAYS * 86400 ))" ]; then
   CLEAN_STATE="stale"          # over 30 days ago; no longer says anything
 elif [ "$CLEANED_AT" -gt "$(( $(date +%s) - UP_SECS ))" ]; then
   CLEAN_STATE="no-restart"     # cleaned up after the machine last booted
@@ -447,42 +479,42 @@ gt() { awk -v a="$1" -v b="$2" 'BEGIN{exit !(a>b)}'; }   # float compare
 
 STRAINED=0; TIGHT=0
 [ "$PRESSURE" = "critical" ] && STRAINED=1
-gt "$SWAP_GB" 6 && STRAINED=1
-[ "${SWAPIN_RATE:-0}" -gt 50 ] && STRAINED=1
+gt "$SWAP_GB" "$T_SWAP_HIGH" && STRAINED=1
+[ "${SWAPIN_RATE:-0}" -gt "$T_SWAPIN" ] && STRAINED=1
 [ "$PRESSURE" = "warning" ] && TIGHT=1
-gt "$SWAP_GB" 2 && TIGHT=1
+gt "$SWAP_GB" "$T_SWAP_WARN" && TIGHT=1
 
 # Swap needs somewhere to live. This pair is the actual failure mode, and it
 # is invisible if you read either number on its own.
 SWAP_SQUEEZE=0
-gt "$SWAP_GB" 2 && [ "$FREE_SPACE_PCT" -lt 15 ] && SWAP_SQUEEZE=1
+gt "$SWAP_GB" "$T_SWAP_WARN" && [ "$FREE_SPACE_PCT" -lt "$T_FREE_CRIT" ] && SWAP_SQUEEZE=1
 
 OLD=0
-[ -n "${AGE_YEARS:-}" ] && [ "$AGE_YEARS" -ge 7 ] && OLD=1
+[ -n "${AGE_YEARS:-}" ] && [ "$AGE_YEARS" -ge "$T_AGE_OBSOLETE" ] && OLD=1
 
 # A volume this small, still short of room after a cleanup, is undersized for
 # the work rather than untidy. Storage is not upgradeable on Apple Silicon.
 UNDERSIZED=0
-[ "${TOTAL_GB:-0}" -le 256 ] && [ "$FREE_SPACE_PCT" -lt 25 ] && UNDERSIZED=1
+[ "${TOTAL_GB:-0}" -le "$T_SMALL_DISK_GB" ] && [ "$FREE_SPACE_PCT" -lt "$T_FREE_TARGET" ] && UNDERSIZED=1
 
 HABITS=""
-[ "$BROWSERS" -ge 2 ] && HABITS="${BROWSERS} browser engines resident"
+[ "$BROWSERS" -ge "$T_BROWSERS" ] && HABITS="${BROWSERS} browser engines resident"
 [ -n "$ROSETTA_APPS" ] && HABITS="${HABITS:+$HABITS; }Rosetta builds: ${ROSETTA_APPS}"
-[ "${UP_DAYS:-0}" -ge 14 ] && HABITS="${HABITS:+$HABITS; }${UP_DAYS} days without a restart"
-[ "$THIRD_PARTY" -ge 15 ] && HABITS="${HABITS:+$HABITS; }${THIRD_PARTY} background items at boot"
-[ "$FREE_SPACE_PCT" -lt 25 ] && [ "$UNDERSIZED" -eq 0 ] && HABITS="${HABITS:+$HABITS; }only ${FREE_SPACE_PCT}% disk free"
+[ "${UP_DAYS:-0}" -ge "$T_UPTIME_DAYS" ] && HABITS="${HABITS:+$HABITS; }${UP_DAYS} days without a restart"
+[ "$THIRD_PARTY" -ge "$T_BG_ITEMS" ] && HABITS="${HABITS:+$HABITS; }${THIRD_PARTY} background items at boot"
+[ "$FREE_SPACE_PCT" -lt "$T_FREE_TARGET" ] && [ "$UNDERSIZED" -eq 0 ] && HABITS="${HABITS:+$HABITS; }only ${FREE_SPACE_PCT}% disk free"
 
 # Has this machine been given a fair chance? Worth saying only when it is
 # actually struggling and there is something left to reclaim.
 WORTH_CLEANING=0
-if [ "$STRAINED" -eq 1 ] || [ "$TIGHT" -eq 1 ] || [ "$FREE_SPACE_PCT" -lt 25 ]; then
-  { gt "$RECLAIM_GB" 2 || [ "${SNAPS:-0}" -ge 3 ]; } && WORTH_CLEANING=1
+if [ "$STRAINED" -eq 1 ] || [ "$TIGHT" -eq 1 ] || [ "$FREE_SPACE_PCT" -lt "$T_FREE_TARGET" ]; then
+  { gt "$RECLAIM_GB" "$T_RECLAIM_GB" || [ "${SNAPS:-0}" -ge "$T_SNAPSHOTS" ]; } && WORTH_CLEANING=1
 fi
 
 HW=""
-[ -n "${SSD_PCT:-}" ] && [ "$SSD_PCT" -ge 40 ] && HW="SSD is ${SSD_PCT}% through its write endurance"
+[ -n "${SSD_PCT:-}" ] && [ "$SSD_PCT" -ge "$T_SSD_HIGH" ] && HW="SSD is ${SSD_PCT}% through its write endurance"
 [ -n "${COND:-}" ] && [ "$COND" != "Normal" ] && HW="${HW:+$HW; }battery condition is ${COND}"
-[ -n "${CYCLES:-}" ] && [ "$CYCLES" -ge 800 ] && HW="${HW:+$HW; }${CYCLES} battery cycles"
+[ -n "${CYCLES:-}" ] && [ "$CYCLES" -ge "$T_BATT_CYCLES" ] && HW="${HW:+$HW; }${CYCLES} battery cycles"
 [ "${PANICS:-0}" -gt 0 ] && HW="${HW:+$HW; }${PANICS} kernel panic(s) in 30 days"
 
 if [ -n "$HW" ]; then
