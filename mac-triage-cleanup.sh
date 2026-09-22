@@ -95,7 +95,27 @@ if [ "$DEV" -eq 1 ]; then
   command -v npm    >/dev/null 2>&1 && run "npm cache clean --force"
   command -v yarn   >/dev/null 2>&1 && run "yarn cache clean"
   command -v pnpm   >/dev/null 2>&1 && run "pnpm store prune"
-  command -v docker >/dev/null 2>&1 && run "docker system prune -af --volumes"
+
+  # Docker is reported, never pruned. "docker system prune --volumes" removes
+  # named volumes, and a named volume is where a local database keeps its data,
+  # not a cache. The rest of this script is safe to run without thinking; that
+  # command is not, so it belongs with the other decisions a human makes.
+  if command -v docker >/dev/null 2>&1; then
+    echo ""
+    echo "   ${BOLD}Docker (report only, nothing pruned)${RST}"
+    DF=$(docker system df 2>/dev/null)
+    if [ -n "$DF" ]; then
+      printf '%s\n' "$DF" | sed 's/^/     /'
+      echo ""
+      echo "     To reclaim images and build cache, keeping your data:"
+      echo "       docker system prune -af"
+      echo "     ${YEL}Do NOT add --volumes unless you know what is in them.${RST}"
+      echo "     ${YEL}It deletes named volumes, which is where local databases live.${RST}"
+      echo "     Check first:  docker volume ls"
+    else
+      echo "     Docker is installed but the daemon is not responding; nothing measured."
+    fi
+  fi
 else
   echo ""
   echo "   (developer caches skipped; add --dev on machines that write code)"

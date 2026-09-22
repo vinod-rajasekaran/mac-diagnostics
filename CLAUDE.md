@@ -59,8 +59,13 @@ one silently corrupted a whole row.
   through `run "…"`, which prints `would run:` unless `--apply` was passed. Any
   new destructive step must use `run`, and must print its size first.
 - Never add deletion of: Documents, Desktop, Downloads, iCloud, browser
-  profiles/cookies/sessions, iOS device backups, or launch agents. These are
-  listed for a human to decide on, never removed.
+  profiles/cookies/sessions, iOS device backups, launch agents, or Docker
+  volumes. These are listed for a human to decide on, never removed.
+- The test for whether something may go in a `run` line: **is it a cache, or is
+  it the only copy of something?** `docker system prune --volumes` fails that
+  test — a named volume is where a local database lives — so Docker is measured
+  with `docker system df` and the command is printed, not run. Anything with the
+  same shape belongs in the report-only section.
 - Settings changes (Apple Intelligence, Login Items, iCloud optimisation,
   Chrome Memory Saver) are printed as instructions, never applied.
 

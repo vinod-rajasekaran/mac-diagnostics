@@ -246,13 +246,20 @@ Every destructive step prints its size before it runs, and prints
 2. **Application caches** — Xcode, Playwright, Homebrew, pip, Slack Service
    Worker, VS Code extension VSIXs.
 3. **Developer caches**, only with `--dev` — DerivedData, iOS DeviceSupport,
-   CoreSimulator caches, and `brew` / `npm` / `yarn` / `pnpm` / `docker` prunes.
+   CoreSimulator caches, and `brew` / `npm` / `yarn` / `pnpm` prunes.
 4. **Trash.**
 
 ### What it only reports
 
-The 12 largest items in the home folder, Downloads over 200 MB, and every
-third-party launch agent and daemon. These are decisions, not cleanups.
+The 12 largest items in the home folder, Downloads over 200 MB, every
+third-party launch agent and daemon, and — with `--dev` — what Docker is
+holding. These are decisions, not cleanups.
+
+**Docker is never pruned**, only measured. `docker system prune --volumes`
+removes named volumes, and a named volume is where a local database keeps its
+data, not a cache. The script prints `docker system df` and the command to
+reclaim images and build cache (`docker system prune -af`, no `--volumes`), and
+leaves you to run it.
 
 ### And what it refuses to do for you
 
@@ -289,8 +296,6 @@ because a script should not silently flip them:
   often the real deciding factor in a replacement, and is not checked — only age.
 - **Thresholds are inline literals**, documented in the table above. Change one,
   change the table.
-- **`--dev` includes `docker system prune --volumes`**, which removes named
-  volumes — that is data, not cache. It should be behind its own flag.
 - **The reclaimable-space estimate runs `du`** over a handful of cache paths,
   which adds a second or two on machines with very large caches.
 
