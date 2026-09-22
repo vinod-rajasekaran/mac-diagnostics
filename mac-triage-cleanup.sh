@@ -2,9 +2,10 @@
 #
 # mac-triage-cleanup.sh   DRY RUN BY DEFAULT.
 #
-#   ./mac-triage-cleanup.sh              show what would be reclaimed, change nothing
-#   ./mac-triage-cleanup.sh --apply      do it
-#   ./mac-triage-cleanup.sh --apply --dev  also clear developer caches
+#   ./mac-triage-cleanup.sh                  show what would be reclaimed, change nothing
+#   ./mac-triage-cleanup.sh --apply          do it
+#   ./mac-triage-cleanup.sh --apply --dev    also clear developer caches
+#   ./mac-triage-cleanup.sh --apply --recheck  ...then re-run the diagnostic
 #
 # Rules this script follows:
 #   - It never deletes anything in Documents, Desktop, Downloads or iCloud.
@@ -15,14 +16,21 @@
 
 set -uo pipefail
 
-APPLY=0; DEV=0
+APPLY=0; DEV=0; RECHECK=0
 for a in "$@"; do
   case "$a" in
     --apply) APPLY=1 ;;
     --dev) DEV=1 ;;
-    -h|--help) sed -n '2,18p' "$0"; exit 0 ;;
+    --recheck) RECHECK=1 ;;
+    -h|--help) sed -n '2,19p' "$0"; exit 0 ;;
   esac
 done
+
+# mac-triage-diagnose.sh reads this to tell apart "never cleaned up", "cleaned
+# up but not restarted yet" and "cleaned up and restarted". Only the last of
+# those makes a REPLACE verdict trustworthy.
+STATE_DIR="$HOME/.mac-triage"
+STATE_FILE="$STATE_DIR/last-cleanup"
 
 if [ -t 1 ] && command -v tput >/dev/null 2>&1; then
   BOLD=$(tput bold); YEL=$(tput setaf 3); GRN=$(tput setaf 2); RST=$(tput sgr0)
@@ -50,7 +58,12 @@ SNAPS=$(tmutil listlocalsnapshots / 2>/dev/null | grep -c 'com.apple.TimeMachine
 [ -z "$SNAPS" ] && SNAPS=0
 echo "   ${SNAPS} snapshot(s) present. These are usually the largest hidden consumer."
 if [ "${SNAPS:-0}" -gt 0 ]; then
-  run "tmutil thinlocalsnapshots / 50000000000 4"
+  # thinlocalsnapshots needs root. Without it the command returns success while
+  # reclaiming nothing, which looks like a cleanup that did not help.
+  if [ "$APPLY" -eq 1 ] && [ "$(id -u)" -ne 0 ] && ! sudo -n true 2>/dev/null; then
+    echo "   ${YEL}Needs root. You will be asked for your password.${RST}"
+  fi
+  run "sudo tmutil thinlocalsnapshots / 50000000000 4"
 fi
 
 # 2 ---------------------------------------------------------- user-level caches
@@ -131,7 +144,20 @@ END_FREE=$(free_gb)
 if [ "$APPLY" -eq 1 ]; then
   echo "${GRN}${BOLD}Free after: ${END_FREE} GB ($(free_pct)% of the volume)${RST}"
   awk -v a="$START_FREE" -v b="$END_FREE" 'BEGIN{printf "Reclaimed: %.1f GB\n", b-a}'
-  echo "Restart the Mac, then re-run mac-triage-diagnose.sh --csv."
+  mkdir -p "$STATE_DIR" 2>/dev/null && date +%s > "$STATE_FILE" 2>/dev/null
+  echo ""
+  echo "${BOLD}Now restart the Mac, then run ./mac-triage-diagnose.sh for the verdict.${RST}"
+  echo "Swap does not come back on its own; without the restart the numbers still"
+  echo "show the old load and the verdict stays provisional."
+  if [ "$RECHECK" -eq 1 ]; then
+    D="$(dirname "$0")/mac-triage-diagnose.sh"
+    if [ -x "$D" ]; then
+      echo ""
+      echo "${YEL}--recheck: running the diagnostic now. This is BEFORE a restart,${RST}"
+      echo "${YEL}so treat it as a progress check, not the verdict.${RST}"
+      exec "$D"
+    fi
+  fi
 else
   echo "${YEL}Dry run finished. Nothing changed. Re-run with --apply.${RST}"
 fi

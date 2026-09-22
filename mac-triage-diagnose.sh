@@ -2,8 +2,9 @@
 #
 # mac-triage-diagnose.sh   READ-ONLY. Changes nothing.
 #
-# Fleet diagnostic tuned to the actual failure mode on an 8GB Apple Silicon
-# Air: memory pressure forcing swap onto a disk with no room for it.
+# Measures this Mac and ends with one verdict for it. Tuned to the failure mode
+# behind most "my Mac is slow" complaints on small-RAM Apple Silicon laptops:
+# memory pressure forcing swap onto a disk with no room for it.
 #
 #   ./mac-triage-diagnose.sh                 human-readable report
 #   ./mac-triage-diagnose.sh --quick         5s sampling window instead of 20s
@@ -399,22 +400,181 @@ fi
 PANICS=$(find /Library/Logs/DiagnosticReports -name "*panic*" -mtime -30 2>/dev/null | wc -l | tr -d ' ')
 [ "${PANICS:-0}" -gt 0 ] && flag "${PANICS} kernel panic report(s) in the last 30 days. That is hardware or a bad driver, not workload."
 
+# ------------------------------------------------------- cleanup state
+
+# Three situations that otherwise look identical from the numbers alone:
+# never cleaned up, cleaned up but not restarted, cleaned up and restarted.
+# Only the last one makes a verdict about the machine itself trustworthy,
+# because swap and leaked memory survive until a restart.
+STATE_FILE="$HOME/.mac-triage/last-cleanup"
+CLEANED_AT=$(cat "$STATE_FILE" 2>/dev/null | head -1 | tr -cd '0-9')
+if [ -z "${CLEANED_AT:-}" ]; then
+  CLEAN_STATE="never"
+elif [ "$(( $(date +%s) - CLEANED_AT ))" -gt 2592000 ]; then
+  CLEAN_STATE="stale"          # over 30 days ago; no longer says anything
+elif [ "$CLEANED_AT" -gt "$(( $(date +%s) - UP_SECS ))" ]; then
+  CLEAN_STATE="no-restart"     # cleaned up after the machine last booted
+else
+  CLEAN_STATE="done"
+fi
+
+# What a cleanup would still reclaim. Only the paths mac-triage-cleanup.sh
+# actually removes, so the number is a promise it can keep.
+RECLAIM_KB=0
+for c in \
+  "$HOME/.Trash" \
+  "$HOME/Library/Caches/com.apple.dt.Xcode" \
+  "$HOME/Library/Caches/ms-playwright" \
+  "$HOME/Library/Caches/Homebrew" \
+  "$HOME/Library/Caches/pip" \
+  "$HOME/Library/Application Support/Slack/Service Worker/CacheStorage" \
+  "$HOME/Library/Application Support/Code/CachedExtensionVSIXs" ; do
+  [ -e "$c" ] || continue
+  K=$(du -sk "$c" 2>/dev/null | awk '{print $1+0; exit}')
+  RECLAIM_KB=$(( RECLAIM_KB + ${K:-0} ))
+done
+RECLAIM_GB=$(awk -v k="$RECLAIM_KB" 'BEGIN{printf "%.1f", k/1048576}')
+
+# ----------------------------------------------------------------- verdict
+#
+# One machine, one answer. Ordered so that the cheapest true explanation wins:
+# spent hardware first because nothing fixes it, then age, then whether the
+# machine has even been given a fair chance, then habits, then workload fit.
+
+VERDICT=""; WHY=""; NEXT=""
+
+gt() { awk -v a="$1" -v b="$2" 'BEGIN{exit !(a>b)}'; }   # float compare
+
+STRAINED=0; TIGHT=0
+[ "$PRESSURE" = "critical" ] && STRAINED=1
+gt "$SWAP_GB" 6 && STRAINED=1
+[ "${SWAPIN_RATE:-0}" -gt 50 ] && STRAINED=1
+[ "$PRESSURE" = "warning" ] && TIGHT=1
+gt "$SWAP_GB" 2 && TIGHT=1
+
+# Swap needs somewhere to live. This pair is the actual failure mode, and it
+# is invisible if you read either number on its own.
+SWAP_SQUEEZE=0
+gt "$SWAP_GB" 2 && [ "$FREE_SPACE_PCT" -lt 15 ] && SWAP_SQUEEZE=1
+
+OLD=0
+[ -n "${AGE_YEARS:-}" ] && [ "$AGE_YEARS" -ge 7 ] && OLD=1
+
+# A volume this small, still short of room after a cleanup, is undersized for
+# the work rather than untidy. Storage is not upgradeable on Apple Silicon.
+UNDERSIZED=0
+[ "${TOTAL_GB:-0}" -le 256 ] && [ "$FREE_SPACE_PCT" -lt 25 ] && UNDERSIZED=1
+
+HABITS=""
+[ "$BROWSERS" -ge 2 ] && HABITS="${BROWSERS} browser engines resident"
+[ -n "$ROSETTA_APPS" ] && HABITS="${HABITS:+$HABITS; }Rosetta builds: ${ROSETTA_APPS}"
+[ "${UP_DAYS:-0}" -ge 14 ] && HABITS="${HABITS:+$HABITS; }${UP_DAYS} days without a restart"
+[ "$THIRD_PARTY" -ge 15 ] && HABITS="${HABITS:+$HABITS; }${THIRD_PARTY} background items at boot"
+[ "$FREE_SPACE_PCT" -lt 25 ] && [ "$UNDERSIZED" -eq 0 ] && HABITS="${HABITS:+$HABITS; }only ${FREE_SPACE_PCT}% disk free"
+
+# Has this machine been given a fair chance? Worth saying only when it is
+# actually struggling and there is something left to reclaim.
+WORTH_CLEANING=0
+if [ "$STRAINED" -eq 1 ] || [ "$TIGHT" -eq 1 ] || [ "$FREE_SPACE_PCT" -lt 25 ]; then
+  { gt "$RECLAIM_GB" 2 || [ "${SNAPS:-0}" -ge 3 ]; } && WORTH_CLEANING=1
+fi
+
+HW=""
+[ -n "${SSD_PCT:-}" ] && [ "$SSD_PCT" -ge 40 ] && HW="SSD is ${SSD_PCT}% through its write endurance"
+[ -n "${COND:-}" ] && [ "$COND" != "Normal" ] && HW="${HW:+$HW; }battery condition is ${COND}"
+[ -n "${CYCLES:-}" ] && [ "$CYCLES" -ge 800 ] && HW="${HW:+$HW; }${CYCLES} battery cycles"
+[ "${PANICS:-0}" -gt 0 ] && HW="${HW:+$HW; }${PANICS} kernel panic(s) in 30 days"
+
+if [ -n "$HW" ]; then
+  VERDICT="REPLACE"
+  WHY="$HW. No amount of cleanup or restraint touches this."
+  NEXT="Get a quote for the repair, and price it against a replacement before paying it."
+elif [ "$CLEAN_STATE" = "no-restart" ]; then
+  VERDICT="RESTART FIRST"
+  WHY="Cleanup has run, but this Mac has not restarted since. Swap and leaked memory survive until it does, so these numbers still describe the old load."
+  NEXT="Restart, work normally for an hour, then run this again."
+elif [ "$WORTH_CLEANING" -eq 1 ] && [ "$CLEAN_STATE" != "done" ]; then
+  VERDICT="CLEAN FIRST"
+  SNAP_CLAUSE=""
+  [ "${SNAPS:-0}" -gt 0 ] && SNAP_CLAUSE=" and ${SNAPS} local snapshot(s)"
+  WHY="Struggling, but it has not been given a fair chance: ${RECLAIM_GB} GB of caches and rubbish${SNAP_CLAUSE} still here. Judging the machine now would blame hardware for housekeeping."
+  NEXT="./mac-triage-cleanup.sh          (dry run, shows what it would take)
+      ./mac-triage-cleanup.sh --apply  then restart, then run this again"
+elif [ "$OLD" -eq 1 ] && { [ "$STRAINED" -eq 1 ] || [ "$TIGHT" -eq 1 ] || [ "$UNDERSIZED" -eq 1 ]; }; then
+  VERDICT="REFRESH"
+  WHY="${AGE_YEARS} years old and still struggling after a clean-up. Tuning it further buys weeks, not years."
+  NEXT="Budget a replacement in the next cycle. It is not an emergency; plan it."
+elif [ "$SWAP_SQUEEZE" -eq 1 ]; then
+  VERDICT="OUT OF ROOM"
+  WHY="${SWAP_GB} GB of swap on a volume with only ${FREE_SPACE_PCT}% free. macOS is paging with nowhere to page to, which is why everything stalls at once rather than one app being slow."
+  NEXT="Free disk space first — that alone usually fixes the stalling. If it comes back, this workload needs more than ${RAM_GB} GB."
+elif [ "$STRAINED" -eq 1 ] && [ -n "$HABITS" ]; then
+  VERDICT="FIX"
+  WHY="Out of RAM, but the load is self-inflicted: ${HABITS}."
+  NEXT="Work through the list above. It costs nothing and usually ends the problem."
+elif [ "$STRAINED" -eq 1 ] && [ "$UNDERSIZED" -eq 1 ]; then
+  VERDICT="REALLOCATE"
+  WHY="Paging hard on a ${TOTAL_GB} GB disk at ${FREE_SPACE_PCT}% free, with nothing obvious left to clean. The disk cannot be enlarged."
+  NEXT="Move this work to a machine with more RAM and disk, and give this one to someone whose work is lighter."
+elif [ "$STRAINED" -eq 1 ]; then
+  VERDICT="REALLOCATE"
+  WHY="Clean machine, sensible habits, still out of RAM under this workload. ${RAM_GB} GB does not fit the work being asked of it."
+  NEXT="Swap machines with someone whose work is lighter, before buying anything."
+elif [ "$TIGHT" -eq 1 ] && [ -n "$HABITS" ]; then
+  VERDICT="FIX"
+  WHY="Close to the edge, and the reasons are all changeable: ${HABITS}."
+  NEXT="Work through the list above before concluding anything about the hardware."
+elif [ "$UNDERSIZED" -eq 1 ]; then
+  VERDICT="REALLOCATE"
+  WHY="Holding for now, but ${TOTAL_GB} GB is undersized for this work and cannot be enlarged."
+  NEXT="Plan to move this person onto a bigger disk; this machine suits lighter work."
+elif [ "$TIGHT" -eq 1 ]; then
+  VERDICT="KEEP"
+  WHY="Tight but holding. Nothing here justifies spending money."
+  NEXT="Keep one browser open and restart weekly, and it will stay this side of the line."
+elif [ -n "$HABITS" ]; then
+  VERDICT="KEEP"
+  WHY="Comfortable right now, though: ${HABITS}."
+  NEXT="Worth tidying before it becomes a complaint, but nothing is wrong today."
+else
+  VERDICT="KEEP"
+  WHY="Everything is within thresholds."
+  NEXT="If it still feels slow, watch the memory list above while it is happening. The cause is one app, not the machine."
+fi
+
+# Say out loud what was not measured, rather than quietly assuming health.
+PROVISIONAL=""; PROV_N=0
+if [ -z "${SSD_PCT:-}" ]; then PROVISIONAL="SSD wear"; PROV_N=1; fi
+if [ -z "${CYCLES:-}" ] && [ -z "${COND:-}" ]; then
+  PROVISIONAL="${PROVISIONAL:+$PROVISIONAL and }battery health"; PROV_N=$(( PROV_N + 1 ))
+fi
+if [ -n "$PROVISIONAL" ] && [ "$VERDICT" != "REPLACE" ]; then
+  if [ "$PROV_N" -gt 1 ]; then
+    PROVISIONAL="${PROVISIONAL} were not measured, so a spent one cannot be ruled out."
+  else
+    PROVISIONAL="${PROVISIONAL} was not measured, so a spent one cannot be ruled out."
+  fi
+else
+  PROVISIONAL=""
+fi
+
 # ----------------------------------------------------------------- summary
 
 if [ "$CSV_MODE" -eq 1 ]; then
-  HEADER="date,host,user,model,ram_gb,os,uptime_days,pressure,free_mem_pct,swap_gb,swapins_sec,free_space_pct,free_gb,snapshots,ssd_pct_used,batt_cycles,batt_cond,bg_items,browsers_running,rosetta_apps,flags,model_year,age_years,in_service,disk_total_gb"
-  ROW=$(printf '%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n' \
+  HEADER="date,host,user,model,ram_gb,os,uptime_days,pressure,free_mem_pct,swap_gb,swapins_sec,free_space_pct,free_gb,snapshots,ssd_pct_used,batt_cycles,batt_cond,bg_items,browsers_running,rosetta_apps,flags,model_year,age_years,in_service,disk_total_gb,verdict,why,cleanup_state,reclaimable_gb"
+  ROW=$(printf '%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n' \
     "$TODAY" "$(csv_safe "$HOSTNAME_S")" "$(csv_safe "$USER_S")" "$(csv_safe "${MODEL:-}")" \
     "$RAM_GB" "$(csv_safe "${OS_VER:-}")" "$UP_DAYS" \
     "$PRESSURE" "${FREE_PCT:-}" "$SWAP_GB" "$SWAPIN_RATE" "$FREE_SPACE_PCT" "$FREE_GB" \
     "${SNAPS:-0}" "${SSD_PCT:-}" "${CYCLES:-}" "$(csv_safe "${COND:-}")" "$THIRD_PARTY" "$BROWSERS" \
     "$(csv_safe "$ROSETTA_APPS")" "$FLAG_COUNT" \
-    "${MODEL_YEAR:-}" "${AGE_YEARS:-}" "${IN_SERVICE:-}" "${TOTAL_GB:-}")
+    "${MODEL_YEAR:-}" "${AGE_YEARS:-}" "${IN_SERVICE:-}" "${TOTAL_GB:-}" \
+    "$(csv_safe "$VERDICT")" "$(csv_safe "$WHY")" "$CLEAN_STATE" "$RECLAIM_GB")
 
   if [ -n "$OUT_FILE" ]; then
     if [ ! -s "$OUT_FILE" ]; then echo "$HEADER" > "$OUT_FILE" || exit 1; fi
     echo "$ROW" >> "$OUT_FILE" || exit 1
-    echo "Appended 1 row for $HOSTNAME_S to $OUT_FILE ($(( $(wc -l < "$OUT_FILE") - 1 )) machine(s) recorded)." >&2
+    echo "Appended 1 row for $HOSTNAME_S to $OUT_FILE ($(( $(wc -l < "$OUT_FILE") - 1 )) run(s) recorded)." >&2
   else
     [ "$WANT_HEADER" -eq 1 ] && echo "$HEADER"
     echo "$ROW"
@@ -424,12 +584,26 @@ fi
 
 sect "Summary"
 if [ "$FLAG_COUNT" -eq 0 ]; then
-  echo "${GRN}Nothing crossed a threshold.${RST} If it still feels slow, watch the memory list above while it happens; the cause is one app, not the machine."
+  echo "${GRN}Nothing crossed a threshold.${RST}"
 else
-  echo "${YEL}${FLAG_COUNT} thing(s) to act on:${RST}"
+  echo "${YEL}${FLAG_COUNT} thing(s) crossed a threshold:${RST}"
   i=1
   while [ "$i" -le "$FLAG_COUNT" ]; do echo "  $i. ${FLAGS[$(( i - 1 ))]}"; i=$(( i + 1 )); done
 fi
+
+case "$VERDICT" in
+  REPLACE|"OUT OF ROOM")       VC="$RED" ;;
+  "CLEAN FIRST"|"RESTART FIRST"|FIX|REFRESH|REALLOCATE) VC="$YEL" ;;
+  *)                            VC="$GRN" ;;
+esac
+
+echo ""
+echo "${BOLD}${VC}VERDICT: ${VERDICT}${RST}"
+echo ""
+echo "$WHY" | fold -s -w 76 | sed 's/^/  /'
+[ -n "$PROVISIONAL" ] && echo "$PROVISIONAL" | fold -s -w 76 | sed 's/^/  (/;s/$/)/'
+echo ""
+echo "${BOLD}Next:${RST}"
+echo "$NEXT" | sed 's/^/  /'
 echo ""
 echo "Read-only. Nothing on this Mac was changed."
-echo "Next: run mac-triage-cleanup.sh, then re-run this with --csv and feed the row to mac-triage-verdict.sh."
