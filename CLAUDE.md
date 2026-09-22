@@ -199,3 +199,9 @@ produce them. Every branch should be reachable from a twelve-row file.
 
 Scripts must stay executable: `chmod +x` and `git update-index --chmod=+x` on
 any new one. `.gitattributes` enforces LF normalisation.
+
+**Never commit collected data.** `*.csv` is gitignored because every row holds a
+real computer name, username, hardware identifier and battery health. Fixtures
+for testing verdict branches belong in the scratch directory, not the repo; if
+one ever needs to be committed, it must use invented hostnames and be named
+something other than `.csv`.

@@ -1,0 +1,8 @@
+# Collected fleet data. Every CSV this toolkit produces contains computer names,
+# usernames, hardware identifiers and battery health for real people's machines.
+# It is measurement output, not source, and it does not belong in the repo.
+fleet.csv
+*.csv
+
+# Scratch output from running the scripts locally
+*.log
